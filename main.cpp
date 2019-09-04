@@ -3,6 +3,7 @@
 #define _WIN32_IE       0x0800
 #define UNICODE
 #define _UNICODE
+#define WINBASE_DECLARE_RESTORE_LAST_ERROR
 
 #include <sdkddkver.h>
 #include <windows.h>
@@ -225,6 +226,11 @@ public:
     {
         operator =(src);
     }
+    void Attach(T* src) throw()
+    {
+        this->Release();
+        this->ptr = src;
+    }
     T* Detach() throw()
     {
         T* ptr = this->ptr;
@@ -267,6 +273,224 @@ public:
     HRESULT QueryInterface(__deref_out Q** outPtr) throw()
     {
         return this->ptr->QueryInterface(IID_PPV_ARGS(outPtr));
+    }
+};
+
+
+template <class T>
+class TPtrArrayDestroyHelper
+{
+public:
+    static void DeleteAllPtrs(HDPA hdpa)
+    {
+        ::DPA_DeleteAllPtrs(hdpa);
+    }
+    static void Destroy(HDPA hdpa)
+    {
+        ::DPA_Destroy(hdpa);
+    }
+};
+
+
+template <class T>
+class TPtrArrayAutoDeleteHelper
+{
+    static int CALLBACK sDeletePtrCB(void* p, void*)
+    {
+        delete static_cast<T*>(p);
+        return 1;
+    }
+
+public:
+    static void DeleteAllPtrs(HDPA hdpa)
+    {
+        ::DPA_EnumCallback(hdpa, sDeletePtrCB, NULL);
+        ::DPA_DeleteAllPtrs(hdpa);
+    }
+    static void Destroy(HDPA hdpa)
+    {
+        ::DPA_DestroyCallback(hdpa, sDeletePtrCB, NULL);
+    }
+};
+
+
+template <class T>
+class TPtrArrayAutoReleaseHelper
+{
+    static int CALLBACK sDeletePtrCB(void* p, void*)
+    {
+        static_cast<T*>(p)->Release();
+        return 1;
+    }
+
+public:
+    static void DeleteAllPtrs(HDPA hdpa)
+    {
+        ::DPA_EnumCallback(hdpa, sDeletePtrCB, NULL);
+        ::DPA_DeleteAllPtrs(hdpa);
+    }
+    static void Destroy(HDPA hdpa)
+    {
+        ::DPA_DestroyCallback(hdpa, sDeletePtrCB, NULL);
+    }
+};
+
+
+template <class T>
+class TPtrArrayAutoFreeHelper
+{
+    static int CALLBACK sDeletePtrCB(void* p, void*)
+    {
+        ::free(p);
+        return 1;
+    }
+
+public:
+    static void DeleteAllPtrs(HDPA hdpa)
+    {
+        ::DPA_EnumCallback(hdpa, sDeletePtrCB, NULL);
+        ::DPA_DeleteAllPtrs(hdpa);
+    }
+    static void Destroy(HDPA hdpa)
+    {
+        ::DPA_DestroyCallback(hdpa, sDeletePtrCB, NULL);
+    }
+};
+
+
+template <class T>
+class TPtrArrayAutoCoFreeHelper
+{
+    static int CALLBACK sDeletePtrCB(void* p, void*)
+    {
+        ::SHFree(p);
+        return 1;
+    }
+
+public:
+    static void DeleteAllPtrs(HDPA hdpa)
+    {
+        ::DPA_EnumCallback(hdpa, sDeletePtrCB, NULL);
+        ::DPA_DeleteAllPtrs(hdpa);
+    }
+    static void Destroy(HDPA hdpa)
+    {
+        ::DPA_DestroyCallback(hdpa, sDeletePtrCB, NULL);
+    }
+};
+
+
+template <class T, int cGrow, typename TDestroy>
+class PtrArray
+{
+private:
+    HDPA hdpa;
+
+    PtrArray(const PtrArray&) throw();
+    PtrArray& operator =(const PtrArray&) throw();
+
+public:
+    PtrArray()
+        : hdpa()
+    {
+    }
+    ~PtrArray()
+    {
+        TDestroy::Destroy(this->hdpa);
+    }
+
+    int GetCount() const throw()
+    {
+        if (this->hdpa == NULL) {
+            return 0;
+        }
+        return DPA_GetPtrCount(this->hdpa);
+    }
+
+    T* FastGetAt(int index) const throw()
+    {
+        return static_cast<T*>(DPA_FastGetPtr(this->hdpa, index));
+    }
+
+    T* GetAt(int index) const throw()
+    {
+        return static_cast<T*>(::DPA_GetPtr(this->hdpa, index));
+    }
+
+    T** GetData() const throw()
+    {
+        if (this->hdpa == NULL) {
+            return NULL;
+        }
+        return reinterpret_cast<T**>(DPA_GetPtrPtr(this->hdpa));
+    }
+
+    bool Grow(int newSize) throw()
+    {
+        return (::DPA_Grow(this->hdpa, newSize) != FALSE);
+    }
+
+    bool SetAtGrow(int index, T* p) throw()
+    {
+        return (::DPA_SetPtr(this->hdpa, index, p) != FALSE);
+    }
+
+    bool Create() throw()
+    {
+        if (this->hdpa != NULL) {
+            return true;
+        }
+        this->hdpa = ::DPA_Create(cGrow);
+        return (this->hdpa != NULL);
+    }
+
+    bool Create(HANDLE hheap) throw()
+    {
+        if (this->hdpa != NULL) {
+            return true;
+        }
+        this->hdpa = ::DPA_CreateEx(cGrow, hheap);
+        return (this->hdpa != NULL);
+    }
+
+    int Add(T* p) throw()
+    {
+        return InsertAt(DA_LAST, p);
+    }
+
+    int InsertAt(int index, T* p) throw()
+    {
+        return ::DPA_InsertPtr(this->hdpa, index, p);
+    }
+
+    T* RemoveAt(int index) throw()
+    {
+        return static_cast<T*>(::DPA_DeletePtr(this->hdpa, index));
+    }
+
+    void RemoveAll()
+    {
+        TDestroy::DeleteAllPtrs(this->hdpa);
+    }
+
+    void Enumerate(__in PFNDAENUMCALLBACK callback, __in_opt void* context) const
+    {
+        ::DPA_EnumCallback(this->hdpa, callback, context);
+    }
+
+    int Search(__in_opt void* key, __in int start, __in PFNDACOMPARE compare, __in LPARAM lParam, __in UINT options)
+    {
+        return ::DPA_Search(this->hdpa, key, start, compare, lParam, options);
+    }
+
+    bool Sort(__in PFNDACOMPARE compare, __in LPARAM lParam)
+    {
+        return (::DPA_Sort(this->hdpa, compare, lParam) != FALSE);
+    }
+
+    T* operator [](int index) const throw()
+    {
+        return GetAt(index);
     }
 };
 
@@ -385,6 +609,83 @@ Fail:
     return hr;
 }
 
+BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
+{
+    const int cxDrag = ::GetSystemMetrics(SM_CXDRAG);
+    const int cyDrag = ::GetSystemMetrics(SM_CYDRAG);
+    const RECT dragRect = { pt.x - cxDrag, pt.y - cyDrag, pt.x + cxDrag, pt.y + cyDrag };
+
+    // start capture
+    ::SetCapture(hwnd);
+
+    do {
+        // sleep the thread while waiting for mouse input
+        const DWORD status = ::MsgWaitForMultipleObjectsEx(0, NULL, INFINITE, QS_MOUSE, MWMO_INPUTAVAILABLE);
+        if (status != WAIT_OBJECT_0) {
+            // unexpected error
+            const DWORD dwLastError = ::GetLastError();
+            ::ReleaseCapture();
+            ::RestoreLastError(dwLastError);
+            return FALSE;
+        }
+
+        MSG msg;
+        while (::PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                // abandoned due to WM_QUIT
+                ::ReleaseCapture();
+                ::PostQuitMessage(static_cast<int>(msg.wParam));
+                return FALSE;
+            }
+
+            // gives the application an opportunity to process the message
+            if (::CallMsgFilter(&msg, MSGF_COMMCTRL_BEGINDRAG)) {
+                continue;
+            }
+
+            switch (msg.message) {
+            case WM_LBUTTONUP:
+            case WM_RBUTTONUP:
+            case WM_MBUTTONUP:
+            case WM_XBUTTONUP:
+            case WM_LBUTTONDOWN:
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+            case WM_XBUTTONDOWN:
+                // mouse button was pressed until the mouse cursor was moved out of the drag rectangle.
+                ::ReleaseCapture();
+                return FALSE;
+
+            case WM_MOUSEMOVE:
+                if (::PtInRect(&dragRect, msg.pt) == FALSE) {
+                    // the mouse was moved out of the drag rectangle while capturing
+                    ::ReleaseCapture();
+                    return TRUE;
+                }
+                break;
+
+            case WM_KEYDOWN:
+                if (msg.wParam == VK_ESCAPE) {
+                    // the ESC key was pressed
+                    ::ReleaseCapture();
+                    return FALSE;
+                }
+                break;
+
+            default:
+                ::TranslateMessage(&msg);
+                ::DispatchMessage(&msg);
+                break;
+            }
+            break;
+        }
+
+        // tracks the mouse movement until mouse capture is released by WM_CANCELMODE
+    } while (::GetCapture() == hwnd);
+
+    return FALSE;
+}
+
 
 template <class T>
 class BaseWindow
@@ -430,6 +731,406 @@ protected:
 };
 
 
+class DataObject : public IDataObject, public IPersist
+{
+protected:
+    struct Item
+    {
+        FORMATETC fetc;
+        STGMEDIUM medium;
+
+        Item() throw()
+        {
+            this->Clear();
+        }
+
+        ~Item() throw()
+        {
+            this->Release();
+        }
+
+        void Clear() throw()
+        {
+            ZeroMemory(&this->fetc, sizeof(this->fetc));
+            ZeroMemory(&this->medium, sizeof(this->medium));
+        }
+
+        void Release() throw()
+        {
+            ::CoTaskMemFree(this->fetc.ptd);
+            ::ReleaseStgMedium(&this->medium);
+        }
+    };
+
+    typedef PtrArray<Item, 0, TPtrArrayAutoDeleteHelper<Item>> ItemArray;
+
+    LONG volatile cRef;
+    ItemArray items;
+
+    static const CLSID CLSID_MyDataObject;
+
+public:
+    DataObject() throw()
+        : cRef(1)
+    {
+    }
+
+    ~DataObject() throw()
+    {
+    }
+
+    STDMETHOD(QueryInterface)(REFIID iid, __deref_out void** ppv) throw()
+    {
+        if (IsEqualIID(iid, __uuidof(IUnknown)) || IsEqualIID(iid, __uuidof(IDataObject))) {
+            *ppv = static_cast<IDataObject*>(this);
+            this->AddRef();
+            return S_OK;
+        }
+        if (IsEqualIID(iid, __uuidof(IPersist))) {
+            *ppv = static_cast<IPersist*>(this);
+            this->AddRef();
+            return S_OK;
+        }
+
+        *ppv = NULL;
+        return E_NOINTERFACE;
+    }
+
+    STDMETHOD_(ULONG, AddRef)() throw()
+    {
+        return ::InterlockedIncrement(&this->cRef);
+    }
+
+    STDMETHOD_(ULONG, Release)() throw()
+    {
+        LONG ret = ::InterlockedDecrement(&this->cRef);
+        if (ret == 0) {
+            delete this;
+        }
+        return ret;
+    }
+
+    STDMETHOD(GetData)(FORMATETC* fetc, STGMEDIUM* medium) throw()
+    {
+        TRACE("IDataObject::GetData\n");
+
+        if (fetc == NULL || medium == NULL) {
+            return E_INVALIDARG;
+        }
+
+        TRACE("  cfFormat = %u\n", fetc->cfFormat);
+        TRACE("  TYMED = %x\n", fetc->tymed);
+
+        Item* item;
+        HRESULT hr = this->FindFORMATETC(fetc, false, &item);
+        if (SUCCEEDED(hr)) {
+            hr = this->AddRefStgMedium(&item->medium, medium, true);
+        }
+        return hr;
+    }
+
+    STDMETHOD(QueryGetData)(FORMATETC* fetc) throw()
+    {
+        TRACE("IDataObject::QueryGetData\n");
+
+        if (fetc == NULL) {
+            return E_INVALIDARG;
+        }
+
+        TRACE("  cfFormat = %u\n", fetc->cfFormat);
+        TRACE("  TYMED = %x\n", fetc->tymed);
+
+        Item* item;
+        return this->FindFORMATETC(fetc, false, &item);
+    }
+
+    STDMETHOD(GetDataHere)(FORMATETC*, STGMEDIUM*) throw()
+    {
+        TRACE("IDataObject::GetDataHere - E_NOTIMPL\n");
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD(GetCanonicalFormatEtc)(FORMATETC*, FORMATETC*) throw()
+    {
+        TRACE("IDataObject::GetCanonicalFormatEtc - E_NOTIMPL\n");
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD(SetData)(FORMATETC* fetc, STGMEDIUM* medium, BOOL fRelease) throw()
+    {
+        TRACE("IDataObject::SetData\n");
+
+        if (fetc == NULL || medium == NULL) {
+            return E_INVALIDARG;
+        }
+
+        Item* item;
+        HRESULT hr = this->FindFORMATETC(fetc, true, &item);
+        if (SUCCEEDED(hr)) {
+            if (item->medium.tymed) {
+                ::ReleaseStgMedium(&item->medium);
+            }
+
+            if (fRelease) {
+                item->medium = *medium;
+                hr = S_OK;
+            } else {
+                hr = this->AddRefStgMedium(medium, &item->medium, true);
+            }
+            item->fetc.tymed = item->medium.tymed;
+
+            IUnknown* unkMedium = GetCanonicalIUnknown(item->medium.pUnkForRelease);
+            IUnknown* unkSelf   = GetCanonicalIUnknown(static_cast<IDataObject*>(this));
+            if (unkMedium == unkSelf) {
+                item->medium.pUnkForRelease->Release();
+                item->medium.pUnkForRelease = NULL;
+            }
+        }
+        return hr;
+    }
+
+    STDMETHOD(EnumFormatEtc)(DWORD direction, __deref_out IEnumFORMATETC** ppenumFetc) throw()
+    {
+        TRACE("IDataObject::EnumFormatEtc\n");
+
+        if (ppenumFetc == NULL) {
+            return E_POINTER;
+        }
+        *ppenumFetc = NULL;
+
+        if (direction != DATADIR_GET) {
+            return E_NOTIMPL;
+        }
+
+        Item** items = this->items.GetData();
+        const int cItems = this->items.GetCount();
+        FORMATETC* fetc = new FORMATETC[cItems];
+        if (fetc == NULL) {
+            return E_OUTOFMEMORY;
+        }
+        for (int i = 0; i < cItems; i++) {
+            fetc[i] = items[i]->fetc;
+        }
+        HRESULT hr = ::SHCreateStdEnumFmtEtc(cItems, fetc, ppenumFetc);
+        delete[] fetc;
+        return hr;
+    }
+
+    STDMETHOD(DAdvise)(FORMATETC*, DWORD, IAdviseSink*, DWORD*) throw()
+    {
+        TRACE("IDataObject::DAdvise - E_NOTIMPL\n");
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD(DUnadvise)(DWORD) throw()
+    {
+        TRACE("IDataObject::DUnadvise - E_NOTIMPL\n");
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD(EnumDAdvise)(IEnumSTATDATA** ppenumAdvise) throw()
+    {
+        TRACE("IDataObject::EnumDAdvise - E_NOTIMPL\n");
+
+        if (ppenumAdvise == NULL) {
+            return E_POINTER;
+        }
+        *ppenumAdvise = NULL;
+        return E_NOTIMPL;
+    }
+
+    STDMETHOD(GetClassID)(__out CLSID* clsid) throw()
+    {
+        *clsid = CLSID_MyDataObject;
+        return S_OK;
+    }
+
+    static HRESULT Clone(IDataObject* dataObjectSrc, __deref_out IDataObject** dataObjectDst) throw()
+    {
+        *dataObjectDst = NULL;
+        ComPtr<DataObject> self;
+        ComPtr<IEnumFORMATETC> enumFetc;
+        self.Attach(new DataObject());
+        HRESULT hr = self != NULL ? S_OK : E_OUTOFMEMORY;
+        if (SUCCEEDED(hr)) {
+            hr = dataObjectSrc->EnumFormatEtc(DATADIR_GET, &enumFetc);
+        }
+        if (SUCCEEDED(hr)) {
+            enumFetc->Reset();
+            for (Item item; SUCCEEDED(hr); item.Clear()) {
+                hr = enumFetc->Next(1, &item.fetc, NULL);
+                if (SUCCEEDED(hr)) {
+                    if (hr != S_OK) {
+                        hr = S_OK;
+                        break;
+                    }
+                    hr = dataObjectSrc->GetData(&item.fetc, &item.medium);
+                    if (FAILED(hr)) {
+                        item.Release();
+                        // ignore failure
+                        hr = S_OK;
+                        continue;
+                    }
+                }
+                if (SUCCEEDED(hr)) {
+                    hr = self->SetData(&item.fetc, &item.medium, TRUE);
+                }
+                if (FAILED(hr)) {
+                    break;
+                }
+            }
+        }
+        if (SUCCEEDED(hr)) {
+            *dataObjectDst = self.Detach();
+        }
+        return hr;
+    }
+
+    static BOOL IsMyDataObject(IDataObject* dataObject) throw()
+    {
+        ComPtr<IPersist> persist;
+        if (SUCCEEDED(dataObject->QueryInterface(IID_PPV_ARGS(&persist)))) {
+            CLSID clsid = {};
+            if (SUCCEEDED(persist->GetClassID(&clsid))) {
+                return IsEqualCLSID(clsid, CLSID_MyDataObject);
+            }
+        }
+        return FALSE;
+    }
+
+protected:
+    HRESULT FindFORMATETC(FORMATETC* fetc, bool addIfNotFound, __deref_out Item** found) throw()
+    {
+        *found = NULL;
+        if ((fetc->dwAspect & DVASPECT_CONTENT) == 0) {
+            TRACE("  - DV_E_DVASPECT\n");
+            return DV_E_DVASPECT;
+        }
+
+        if (fetc->ptd != NULL) {
+            TRACE("  - DV_E_DVTARGETDEVICE\n");
+            return DV_E_DVTARGETDEVICE;
+        }
+
+        Item** items = this->items.GetData();
+        const int cItems = this->items.GetCount();
+        for (int i = 0; i < cItems; i++) {
+            if (items[i]->fetc.cfFormat != fetc->cfFormat
+                    || (items[i]->fetc.tymed & fetc->tymed) == 0
+                    || (items[i]->fetc.lindex == -1 && items[i]->fetc.lindex != fetc->lindex)) {
+                continue;
+            }
+
+            if (addIfNotFound || (items[i]->fetc.tymed & fetc->tymed)) {
+                TRACE("  - S_OK\n");
+                *found = items[i];
+                return S_OK;
+            }
+
+            TRACE("  - DV_E_TYMED\n");
+            return DV_E_TYMED;
+        }
+
+        if (addIfNotFound == false) {
+            TRACE("  - DATA_E_FORMATETC\n");
+            return DATA_E_FORMATETC;
+        }
+
+        Item* item = new Item();
+        if (item == NULL) {
+            return E_OUTOFMEMORY;
+        }
+        CopyMemory(&item->fetc, fetc, sizeof(FORMATETC));
+
+        this->items.Create();
+        if (this->items.Add(item) == -1) {
+            TRACE("  - E_OUTOFMEMORY\n");
+            delete item;
+            return E_OUTOFMEMORY;
+        }
+
+        *found = item;
+        TRACE("  - S_OK\n");
+        return S_OK;
+    }
+
+    HRESULT AddRefStgMedium(__in STGMEDIUM* mediumIn, __out STGMEDIUM* mediumOut, bool copyIn) throw()
+    {
+        HRESULT hr = S_OK;
+        STGMEDIUM temp = *mediumIn;
+
+        if (mediumIn->pUnkForRelease == NULL && (mediumIn->tymed & (TYMED_ISTREAM | TYMED_ISTORAGE)) == 0) {
+            if (copyIn) {
+                if (mediumIn->tymed != TYMED_HGLOBAL) {
+                    return DV_E_TYMED;
+                }
+
+                temp.hGlobal = GlobalClone(mediumIn->hGlobal);
+                if (temp.hGlobal == NULL) {
+                    return E_OUTOFMEMORY;
+                }
+            } else {
+                temp.pUnkForRelease = static_cast<IDataObject*>(this);
+            }
+        }
+
+        if (SUCCEEDED(hr)) {
+            switch (temp.tymed) {
+            case TYMED_ISTREAM:
+                temp.pstm->AddRef();
+                break;
+            case TYMED_ISTORAGE:
+                temp.pstg->AddRef();
+                break;
+            }
+
+            if (temp.pUnkForRelease != NULL) {
+                temp.pUnkForRelease->AddRef();
+            }
+            *mediumOut = temp;
+        }
+        return hr;
+    }
+
+    static HGLOBAL GlobalClone(HGLOBAL hglobSrc) throw()
+    {
+        if (hglobSrc != NULL) {
+            const size_t cbSize = ::GlobalSize(hglobSrc);
+            void* const srcPtr = ::GlobalLock(hglobSrc);
+            if (srcPtr != NULL) {
+                HGLOBAL hglobDst = ::GlobalAlloc(GMEM_MOVEABLE, cbSize);
+                if (hglobDst != NULL) {
+                    void* const dstPtr = ::GlobalLock(hglobDst);
+                    if (dstPtr != NULL) {
+                        CopyMemory(dstPtr, srcPtr, cbSize);
+                        ::GlobalUnlock(hglobDst);
+                        ::GlobalUnlock(hglobSrc);
+                        return hglobDst;
+                    }
+                    ::GlobalFree(hglobDst);
+                }
+                ::GlobalUnlock(hglobSrc);
+            }
+        }
+        return NULL;
+    }
+
+    static IUnknown* GetCanonicalIUnknown(IUnknown* unk) throw()
+    {
+        IUnknown* unkCanonical = NULL;
+        if (unk != NULL && SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&unkCanonical)))) {
+            unkCanonical->Release();
+        } else {
+            unkCanonical = unk;
+        }
+        return unkCanonical;
+    }
+};
+
+// {6DB994BF-6A3C-4355-BCEF-9A412221E033}
+const CLSID DataObject::CLSID_MyDataObject = { 0x6db994bf, 0x6a3c, 0x4355, { 0xbc, 0xef, 0x9a, 0x41, 0x22, 0x21, 0xe0, 0x33 } };
+
+
 template <class T>
 class DECLSPEC_NOVTABLE DropTargetImpl : public IDropTarget, public IOleWindow
 {
@@ -451,7 +1152,7 @@ public:
     {
     }
 
-    STDMETHOD(QueryInterface)(REFIID iid, void** ppv) throw()
+    STDMETHOD(QueryInterface)(REFIID iid, __deref_out void** ppv) throw()
     {
         if (IsEqualIID(iid, __uuidof(IUnknown)) || IsEqualIID(iid, __uuidof(IDropTarget))) {
             *ppv = static_cast<IDropTarget*>(this);
@@ -743,7 +1444,9 @@ protected:
         HANDLE_MSG(hwnd, WM_INITMENU, OnInitMenu);
         HANDLE_MSG(hwnd, WM_INITMENUPOPUP, OnInitMenuPopup);
         HANDLE_MSG(hwnd, WM_CONTEXTMENU, OnContextMenu);
-        HANDLE_MSG(hwnd, WM_LBUTTONDOWN, OnLButtonDown);
+        HANDLE_MSG(hwnd, WM_LBUTTONDOWN, OnButtonDown);
+        HANDLE_MSG(hwnd, WM_RBUTTONDOWN, OnButtonDown);
+        HANDLE_MSG(hwnd, WM_MBUTTONDOWN, OnButtonDown);
         HANDLE_MSG(hwnd, WM_PAINT, OnPaint);
         }
         return ::DefWindowProc(hwnd, message, wParam, lParam);
@@ -765,7 +1468,7 @@ protected:
         ::PostQuitMessage(0);
     }
 
-    void OnCommand(HWND hwnd, int id, HWND, UINT code) throw()
+    void OnCommand(HWND, int, HWND, UINT) throw()
     {
     }
 
@@ -789,20 +1492,20 @@ protected:
         ::InvalidateRect(hwnd, NULL, FALSE);
     }
 
-    void OnActivate(HWND, UINT state, HWND, BOOL) throw()
+    void OnActivate(HWND, UINT, HWND, BOOL) throw()
     {
     }
 
-    LRESULT OnNotify(HWND hwnd, int idFrom, NMHDR* pnmhdr) throw()
+    LRESULT OnNotify(HWND, int, NMHDR*) throw()
     {
         return 0;
     }
 
-    void OnInitMenu(HWND, HMENU hMenu) throw()
+    void OnInitMenu(HWND, HMENU) throw()
     {
     }
 
-    void OnInitMenuPopup(HWND, HMENU hMenu, UINT, BOOL) throw()
+    void OnInitMenuPopup(HWND, HMENU, UINT, BOOL) throw()
     {
     }
 
@@ -811,14 +1514,14 @@ protected:
         FORWARD_WM_CONTEXTMENU(hwnd, hwndContext, xPos, yPos, ::DefWindowProc);
     }
 
-    void OnLButtonDown(HWND hwnd, BOOL, int, int, UINT) throw()
+    void OnButtonDown(HWND hwnd, BOOL, int, int, UINT) throw()
     {
         if (this->dataObject == NULL) {
             return;
         }
         POINT pt = {};
         ::GetCursorPos(&pt);
-        if (::DragDetect(hwnd, pt)) {
+        if (MyDragDetect(hwnd, pt)) {
             DWORD effect = DROPEFFECT_COPY;
             ::SHDoDragDrop(hwnd, this->dataObject, NULL, effect, &effect);
         }
@@ -835,6 +1538,7 @@ protected:
             if (this->bitmap != NULL) {
                 int width, height;
                 double scale = this->ScaleSize(rect.right, rect.bottom, &width, &height);
+                scale; // unused
                 int x = (rect.right - width) / 2;
                 int y = (rect.bottom - height) / 2;
                 HDC hdcMem = ::CreateCompatibleDC(hdc);
@@ -858,13 +1562,19 @@ protected:
         return scale;
     }
 
-    DROPEFFECT OnDragEnter(IDataObject*, DWORD, POINT) throw()
+    DROPEFFECT OnDragEnter(IDataObject* dataObject, DWORD, POINT) throw()
     {
+        if (DataObject::IsMyDataObject(dataObject)) {
+            return DROPEFFECT_NONE;
+        }
         return DROPEFFECT_COPY;
     }
 
     DROPEFFECT OnDragOver(DWORD, POINT) throw()
     {
+        if (DataObject::IsMyDataObject(this->dataObjectDragging)) {
+            return DROPEFFECT_NONE;
+        }
         return DROPEFFECT_COPY;
     }
 
@@ -874,13 +1584,19 @@ protected:
 
     DROPEFFECT OnDrop(IDataObject* dataObject, DWORD, POINT) throw()
     {
-        this->dataObject = dataObject;
+        if (DataObject::IsMyDataObject(dataObject)) {
+            return DROPEFFECT_NONE;
+        }
+        this->dataObject.Release();
         if (this->bitmap != NULL) {
             DeleteBitmap(this->bitmap);
             this->bitmap = NULL;
         }
+        if (FAILED(DataObject::Clone(dataObject, &this->dataObject))) {
+            return DROPEFFECT_NONE;
+        }
         ComPtr<IShellItemImageFactory> factory;
-        HRESULT hr = ::SHGetItemFromDataObject(dataObject, DOGIF_DEFAULT, IID_PPV_ARGS(&factory));
+        HRESULT hr = ::SHGetItemFromDataObject(this->dataObject, DOGIF_DEFAULT, IID_PPV_ARGS(&factory));
         if (SUCCEEDED(hr)) {
             const SIZE size = { 256, 256 };
             hr = factory->GetImage(size, SIIGBF_RESIZETOFIT, &this->bitmap);
