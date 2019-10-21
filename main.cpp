@@ -22,51 +22,6 @@
 
 #include <strsafe.h>
 
-WINCOMMCTRLAPI HRESULT WINAPI ImageList_CoCreateInstance(__in REFCLSID rclsid, __in_opt const IUnknown *punkOuter, __in REFIID riid, __deref_out void **ppv);
-
-#undef INTERFACE
-#define INTERFACE IImageList
-
-DECLARE_INTERFACE_IID_(IImageList, IUnknown, "46EB5926-582E-4017-9FDF-E8998DAA0950")
-{
-    BEGIN_INTERFACE
-
-    STDMETHOD(QueryInterface)(THIS_ REFIID riid, void **ppv) PURE;
-    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
-    STDMETHOD_(ULONG,Release)(THIS) PURE;
-    STDMETHOD(Add)(THIS_ __in HBITMAP hbmImage, __in_opt HBITMAP hbmMask, __out int *pi) PURE;
-    STDMETHOD(ReplaceIcon)(THIS_ int i, __in HICON hicon, __out int *pi) PURE;
-    STDMETHOD(SetOverlayImage)(THIS_ int iImage, int iOverlay) PURE;
-    STDMETHOD(Replace)(THIS_ int i, __in HBITMAP hbmImage, __in_opt HBITMAP hbmMask) PURE;
-    STDMETHOD(AddMasked)(THIS_ __in HBITMAP hbmImage, COLORREF crMask, __out int *pi) PURE;
-    STDMETHOD(Draw)(THIS_ __in IMAGELISTDRAWPARAMS *pimldp) PURE;
-    STDMETHOD(Remove)(THIS_ int i) PURE;
-    STDMETHOD(GetIcon)(THIS_ int i, UINT flags, __out HICON *picon) PURE;
-    STDMETHOD(GetImageInfo)(THIS_ int i, __out IMAGEINFO *pImageInfo) PURE;
-    STDMETHOD(Copy)(THIS_ int iDst, __in IUnknown *punkSrc, int iSrc, UINT uFlags) PURE;
-    STDMETHOD(Merge)(THIS_ int i1, __in IUnknown *punk2, int i2, int dx, int dy, REFIID riid, __deref_out void **ppv) PURE;
-    STDMETHOD(Clone)(THIS_ REFIID riid, __deref_out void **ppv) PURE;
-    STDMETHOD(GetImageRect)(THIS_ int i, __out RECT *prc) PURE;
-    STDMETHOD(GetIconSize)(THIS_ __out int *cx, __out int *cy) PURE;
-    STDMETHOD(SetIconSize)(THIS_ int cx, int cy) PURE;
-    STDMETHOD(GetImageCount)(THIS_ __out int *pi) PURE;
-    STDMETHOD(SetImageCount)(THIS_ UINT uNewCount) PURE;
-    STDMETHOD(SetBkColor)(THIS_ COLORREF clrBk, __out COLORREF *pclr) PURE;
-    STDMETHOD(GetBkColor)(THIS_ __out COLORREF *pclr) PURE;
-    STDMETHOD(BeginDrag)(THIS_ int iTrack, int dxHotspot, int dyHotspot) PURE;
-    STDMETHOD(EndDrag)(THIS_ void) PURE;
-    STDMETHOD(DragEnter)(THIS_ __in_opt HWND hwndLock, int x, int y) PURE;
-    STDMETHOD(DragLeave)(THIS_ __in_opt HWND hwndLock) PURE;
-    STDMETHOD(DragMove)(THIS_ int x, int y) PURE;
-    STDMETHOD(SetDragCursorImage)(THIS_ __in IUnknown *punk, int iDrag, int dxHotspot, int dyHotspot) PURE;
-    STDMETHOD(DragShowNolock)(THIS_ BOOL fShow) PURE;
-    STDMETHOD(GetDragImage)(THIS_ __out_opt POINT *ppt, __out_opt POINT *pptHotspot, REFIID riid, __deref_out void **ppv) PURE;
-    STDMETHOD(GetItemFlags)(THIS_ int i, __out DWORD *dwFlags) PURE;
-    STDMETHOD(GetOverlayImage)(THIS_ int iOverlay, __out int *piIndex) PURE;
-
-    END_INTERFACE
-};
-
 //#define USETRACE
 
 // https://blogs.msdn.microsoft.com/oldnewthing/20041025-00/?p=37483/
@@ -497,50 +452,6 @@ public:
 };
 
 
-static HRESULT StreamRead(IStream* stream, void* data, DWORD size)
-{
-    if (size == 0) {
-        return S_OK;
-    }
-    DWORD read = 0;
-    HRESULT hr = stream->Read(data, size, &read);
-    if (SUCCEEDED(hr) && size != read) {
-        hr = E_FAIL;
-    }
-    return hr;
-}
-
-static HRESULT StreamWrite(IStream* stream, const void* data, DWORD size)
-{
-    if (size == 0) {
-        return S_OK;
-    }
-    DWORD written = 0;
-    HRESULT hr = stream->Write(data, size, &written);
-    if (SUCCEEDED(hr) && size != written) {
-        hr = E_FAIL;
-    }
-    return hr;
-}
-
-
-enum ControlID
-{
-    IDC_LISTVIEW = 1,
-    IDC_STATUSBAR,
-    IDC_EDIT,
-    IDC_LAST,
-};
-
-HBITMAP Create32bppTopDownDIB(int cx, int cy, __deref_out_opt void** bits) throw()
-{
-    BITMAPINFOHEADER bmi = {
-        sizeof(BITMAPINFOHEADER),
-        cx, -cy, 1, 32
-    };
-    return ::CreateDIBSection(NULL, reinterpret_cast<BITMAPINFO*>(&bmi), DIB_RGB_COLORS, bits, NULL, 0);
-}
-
 BOOL GetWorkAreaRect(HWND hwnd, __out RECT* prc) throw()
 {
     HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -553,33 +464,6 @@ BOOL GetWorkAreaRect(HWND hwnd, __out RECT* prc) throw()
         }
     }
     return FALSE;
-}
-
-void SetWindowPosition(HWND hwnd, int x, int y, int cx, int cy) throw()
-{
-    RECT rcWork;
-    if (GetWorkAreaRect(hwnd, &rcWork)) {
-        int dx = 0, dy = 0;
-        if (x < rcWork.left) {
-            dx = rcWork.left - x;
-        }
-        if (y < rcWork.top) {
-            dy = rcWork.top - y;
-        }
-        if (x + cx + dx > rcWork.right) {
-            dx = rcWork.right - x - cx;
-            if (x + dx < rcWork.left) {
-                dx += rcWork.left - x;
-            }
-        }
-        if (y + cy + dy > rcWork.bottom) {
-            dy = rcWork.bottom - y - cy;
-            if (y + dx < rcWork.top) {
-                dy += rcWork.top - y;
-            }
-        }
-        ::MoveWindow(hwnd, x + dx, y + dy, cx, cy, TRUE);
-    }
 }
 
 void CenterWindowPos(HWND hwnd, HWND hwndAfter, int width, int height, UINT flags = SWP_NOACTIVATE) throw()
@@ -601,40 +485,20 @@ void MyAdjustWindowRect(HWND hwnd, __inout LPRECT lprc) throw()
     lprc->bottom += rect.top;
 }
 
-HRESULT BrowseForFolder(__in_opt HWND hwndOwner, __deref_out LPWSTR* path) throw()
-{
-    *path = NULL;
-    HRESULT hr;
-    ComPtr<IFileOpenDialog> dlg;
-    ComPtr<IShellItem> si;
-    DWORD options;
-
-    FAIL_HR(hr = dlg.CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER));
-    FAIL_HR(hr = dlg->GetOptions(&options));
-    FAIL_HR(hr = dlg->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS));
-    FAIL_HR(hr = dlg->Show(hwndOwner));
-    FAIL_HR(hr = dlg->GetResult(&si));
-
-    FAIL_HR(hr = si->GetDisplayName(SIGDN_FILESYSPATH, path));
-
-Fail:
-    return hr;
-}
-
 BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
 {
     const int cxDrag = ::GetSystemMetrics(SM_CXDRAG);
     const int cyDrag = ::GetSystemMetrics(SM_CYDRAG);
     const RECT dragRect = { pt.x - cxDrag, pt.y - cyDrag, pt.x + cxDrag, pt.y + cyDrag };
 
-    // start capture
+    // Start capture
     ::SetCapture(hwnd);
 
     do {
-        // sleep the thread while waiting for mouse input
+        // Sleep the current thread until any mouse/key input is in the queue.
         const DWORD status = ::MsgWaitForMultipleObjectsEx(0, NULL, INFINITE, QS_MOUSE | QS_KEY, MWMO_INPUTAVAILABLE);
         if (status != WAIT_OBJECT_0) {
-            // unexpected error
+            // Unexpected error.
             const DWORD dwLastError = ::GetLastError();
             ::ReleaseCapture();
             ::RestoreLastError(dwLastError);
@@ -644,13 +508,13 @@ BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
         MSG msg;
         while (::PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
-                // abandoned due to WM_QUIT
+                // Bail out due to WM_QUIT.
                 ::ReleaseCapture();
                 ::PostQuitMessage(static_cast<int>(msg.wParam));
                 return FALSE;
             }
 
-            // gives the application an opportunity to process the message
+            // Give an application the opportunity to process this message first.
             if (::CallMsgFilter(&msg, MSGF_COMMCTRL_BEGINDRAG)) {
                 continue;
             }
@@ -664,13 +528,13 @@ BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
             case WM_RBUTTONDOWN:
             case WM_MBUTTONDOWN:
             case WM_XBUTTONDOWN:
-                // mouse button was pressed until the mouse cursor was moved out of the drag rectangle.
+                // A mouse button is pressed while the mouse cursor is staying inside the drag rectangle.
                 ::ReleaseCapture();
                 return FALSE;
 
             case WM_MOUSEMOVE:
                 if (::PtInRect(&dragRect, msg.pt) == FALSE) {
-                    // the mouse was moved out of the drag rectangle while capturing
+                    // The mouse cursor is moved out of the drag rectangle.
                     ::ReleaseCapture();
                     return TRUE;
                 }
@@ -678,7 +542,7 @@ BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
 
             case WM_KEYDOWN:
                 if (msg.wParam == VK_ESCAPE) {
-                    // the ESC key was pressed
+                    // the ESC key is pressed.
                     ::ReleaseCapture();
                     return FALSE;
                 }
@@ -692,7 +556,7 @@ BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
             break;
         }
 
-        // tracks the mouse movement until mouse capture is released by WM_CANCELMODE
+        // Loop until the mouse capture is released by WM_CANCELMODE.
     } while (::GetCapture() == hwnd);
 
     return FALSE;
@@ -717,6 +581,8 @@ void SetWindowBlur(HWND hwnd)
             ULONG cbData;
         };
 
+        // Might be broken in the future due to this undocumented API
+        // https://www.google.com/search?q=SetWindowCompositionAttribute
         BOOL (WINAPI* SetWindowCompositionAttribute)(HWND, WINCOMPATTRDATA*);
         reinterpret_cast<FARPROC&>(SetWindowCompositionAttribute) = ::GetProcAddress(hmod, "SetWindowCompositionAttribute");
         if (SetWindowCompositionAttribute != NULL) {
@@ -1464,7 +1330,6 @@ protected:
     int height;
     HFONT font;
     LPWSTR name;
-    ComPtr<IImageList> imageList;
     ComPtr<IDataObject> dataObject;
 
     static void ErrorMessage(HWND hwnd, LPCWSTR name) throw()
