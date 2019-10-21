@@ -14,6 +14,8 @@
 #include <shlwapi.h>
 #include <wincodec.h>
 #include <uxtheme.h>
+#include <vsstyle.h>
+#include <vssym32.h>
 #include <stddef.h>
 #include <intrin.h>
 #include <math.h>
@@ -580,6 +582,16 @@ void SetWindowPosition(HWND hwnd, int x, int y, int cx, int cy) throw()
     }
 }
 
+void CenterWindowPos(HWND hwnd, HWND hwndAfter, int width, int height, UINT flags = SWP_NOACTIVATE) throw()
+{
+    RECT parentRect;
+    if (GetWorkAreaRect(hwnd, &parentRect)) {
+        const LONG x = parentRect.left + ((parentRect.right - parentRect.left) - width) / 2;
+        const LONG y = parentRect.top + ((parentRect.bottom - parentRect.top) - height) / 2;
+        ::SetWindowPos(hwnd, hwndAfter, x, y, width, height, flags);
+    }
+}
+
 void MyAdjustWindowRect(HWND hwnd, __inout LPRECT lprc) throw()
 {
     ::AdjustWindowRect(lprc, WS_OVERLAPPEDWINDOW, TRUE);
@@ -620,7 +632,7 @@ BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
 
     do {
         // sleep the thread while waiting for mouse input
-        const DWORD status = ::MsgWaitForMultipleObjectsEx(0, NULL, INFINITE, QS_MOUSE, MWMO_INPUTAVAILABLE);
+        const DWORD status = ::MsgWaitForMultipleObjectsEx(0, NULL, INFINITE, QS_MOUSE | QS_KEY, MWMO_INPUTAVAILABLE);
         if (status != WAIT_OBJECT_0) {
             // unexpected error
             const DWORD dwLastError = ::GetLastError();
@@ -684,6 +696,36 @@ BOOL MyDragDetect(__in HWND hwnd, __in POINT pt) throw()
     } while (::GetCapture() == hwnd);
 
     return FALSE;
+}
+
+void SetWindowBlur(HWND hwnd)
+{
+    HINSTANCE hmod = ::LoadLibrary(TEXT("user32.dll"));
+    if (hmod != NULL) {
+        struct ACCENTPOLICY
+        {
+            int nAccentState;
+            int nFlags;
+            int nColor;
+            int nAnimationId;
+        };
+
+        struct WINCOMPATTRDATA
+        {
+            int nAttribute;
+            PVOID pData;
+            ULONG cbData;
+        };
+
+        BOOL (WINAPI* SetWindowCompositionAttribute)(HWND, WINCOMPATTRDATA*);
+        reinterpret_cast<FARPROC&>(SetWindowCompositionAttribute) = ::GetProcAddress(hmod, "SetWindowCompositionAttribute");
+        if (SetWindowCompositionAttribute != NULL) {
+            ACCENTPOLICY policy = { 3, 0, 0, 0 };
+            WINCOMPATTRDATA data = { 19, &policy, sizeof(ACCENTPOLICY) };
+            SetWindowCompositionAttribute(hwnd, &data);
+        }
+        ::FreeLibrary(hmod);
+    }
 }
 
 
@@ -1420,6 +1462,8 @@ protected:
     HBITMAP bitmap;
     int width;
     int height;
+    HFONT font;
+    LPWSTR name;
     ComPtr<IImageList> imageList;
     ComPtr<IDataObject> dataObject;
 
@@ -1458,6 +1502,12 @@ protected:
             return false;
         }
         this->RegisterDragDrop(hwnd);
+        this->InitFont();
+        HMENU menu = ::GetSystemMenu(hwnd, FALSE);
+        ::RemoveMenu(menu, SC_RESTORE, MF_BYCOMMAND);
+        ::RemoveMenu(menu, SC_MINIMIZE, MF_BYCOMMAND);
+        ::RemoveMenu(menu, SC_MAXIMIZE, MF_BYCOMMAND);
+        ::SetWindowBlur(hwnd);
         return true;
     }
 
@@ -1489,6 +1539,7 @@ protected:
 
     void OnSettingChange(HWND hwnd, UINT, LPCTSTR) throw()
     {
+        this->InitFont();
         ::InvalidateRect(hwnd, NULL, FALSE);
     }
 
@@ -1511,45 +1562,114 @@ protected:
 
     void OnContextMenu(HWND hwnd, HWND hwndContext, int xPos, int yPos) throw()
     {
+        ::PostMessage(hwnd, 0x313, 0, MAKELPARAM(xPos, yPos));
         FORWARD_WM_CONTEXTMENU(hwnd, hwndContext, xPos, yPos, ::DefWindowProc);
     }
 
     void OnButtonDown(HWND hwnd, BOOL, int, int, UINT) throw()
     {
-        if (this->dataObject == NULL) {
-            return;
+        if (this->dataObject != NULL) {
+            POINT pt = {};
+            ::GetCursorPos(&pt);
+            RECT rect = {};
+            ::GetClientRect(hwnd, &rect);
+            ::InflateRect(&rect, -16, -16);
+            MapWindowRect(hwnd, HWND_DESKTOP, &rect);
+            if (::PtInRect(&rect, pt)) {
+                if (MyDragDetect(hwnd, pt)) {
+                    DWORD effect = DROPEFFECT_COPY;
+                    ::SHDoDragDrop(hwnd, this->dataObject, NULL, effect, &effect);
+                }
+                return;
+            }
         }
-        POINT pt = {};
-        ::GetCursorPos(&pt);
-        if (MyDragDetect(hwnd, pt)) {
-            DWORD effect = DROPEFFECT_COPY;
-            ::SHDoDragDrop(hwnd, this->dataObject, NULL, effect, &effect);
-        }
+        ::SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     }
 
     void OnPaint(HWND hwnd) throw()
     {
         PAINTSTRUCT ps = {};
-        HDC hdc = ::BeginPaint(hwnd, &ps);
-        if (hdc != NULL) {
+        if (::BeginPaint(hwnd, &ps) != NULL) {
             RECT rect = {};
             ::GetClientRect(hwnd, &rect);
-            ::PatBlt(hdc, 0, 0, rect.right, rect.bottom, WHITENESS);
-            if (this->bitmap != NULL) {
-                int width, height;
-                double scale = this->ScaleSize(rect.right, rect.bottom, &width, &height);
-                scale; // unused
-                int x = (rect.right - width) / 2;
-                int y = (rect.bottom - height) / 2;
-                HDC hdcMem = ::CreateCompatibleDC(hdc);
-                HBITMAP bmpOld = SelectBitmap(hdcMem, this->bitmap);
-                BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-                ::GdiAlphaBlend(hdc, x, y, width, height, hdcMem, 0, 0, this->width, this->height, bf);
-                SelectBitmap(hdcMem, bmpOld);
-                ::DeleteDC(hdcMem);
+            const SIZE size = { rect.right, rect.bottom };
+            BP_PAINTPARAMS bppp = { sizeof(bppp) };
+            bppp.dwFlags = BPPF_ERASE;
+            HDC hdc = NULL;
+            HPAINTBUFFER hpb = ::BeginBufferedPaint(ps.hdc, &rect, BPBF_COMPOSITED, &bppp, &hdc);
+            if (hpb != NULL) {
+                this->PaintContent(hwnd, hdc, size);
+                ::EndBufferedPaint(hpb, TRUE);
             }
             ::EndPaint(hwnd, &ps);
         }
+    }
+
+    void PaintContent(HWND hwnd, HDC hdc, const SIZE size)
+    {
+        this->DrawBitmap(hwnd, hdc, size);
+        this->DrawText(hwnd, hdc, size);
+    }
+
+    void DrawBitmap(HWND, HDC hdc, const SIZE size)
+    {
+        if (this->bitmap != NULL) {
+            int width, height;
+            double scale = this->ScaleSize(size.cx, size.cy, &width, &height);
+            scale; // unused
+            int x = (size.cx - width) / 2;
+            int y = (size.cy - height) / 2;
+            HDC hdcMem = ::CreateCompatibleDC(hdc);
+            HBITMAP bmpOld = SelectBitmap(hdcMem, this->bitmap);
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            ::GdiAlphaBlend(hdc, x, y, width, height, hdcMem, 0, 0, this->width, this->height, bf);
+            SelectBitmap(hdcMem, bmpOld);
+            ::DeleteDC(hdcMem);
+        }
+    }
+
+    void DrawText(HWND hwnd, HDC hdc, const SIZE size)
+    {
+        if (this->name != NULL) {
+            HFONT fontOld = SelectFont(hdc, this->font);
+            TEXTMETRIC tm = {};
+            ::GetTextMetrics(hdc, &tm);
+            RECT rect = { 0, size.cy - tm.tmHeight - 8, size.cx, size.cy };
+            if (rect.top < 0) {
+                rect.top = 0;
+            }
+            DTTOPTS dtto = { sizeof(dtto) };
+            dtto.dwFlags = DTT_TEXTCOLOR | DTT_COMPOSITED;
+            dtto.crText = 0;
+            HTHEME theme = ::OpenThemeData(hwnd, L"globals");
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    if (x != 0 && y != 0) {
+                        RECT shadowRect = rect;
+                        ::OffsetRect(&shadowRect, x, y);
+                        ::DrawThemeTextEx(theme, hdc, TEXT_BODYTITLE, 0, this->name, -1, DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, &shadowRect, &dtto);
+                    }
+                }
+            }
+            dtto.crText = 0xffffff;
+            ::DrawThemeTextEx(theme, hdc, TEXT_BODYTITLE, 0, this->name, -1, DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, &rect, &dtto);
+            ::CloseThemeData(theme);
+            SelectFont(hdc, fontOld);
+        }
+    }
+
+    void InitFont()
+    {
+        if (this->font != NULL) {
+            DeleteFont(this->font);
+        }
+        NONCLIENTMETRICS ncm = { sizeof(ncm) };
+        ::SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+        // ncm.lfStatusFont.lfHeight = ncm.lfStatusFont.lfHeight * 4 / 3;
+        // ncm.lfStatusFont.lfWidth = 0;
+        ncm.lfStatusFont.lfWeight += FW_BOLD;
+        ncm.lfStatusFont.lfQuality = ANTIALIASED_QUALITY;
+        this->font = ::CreateFontIndirect(&ncm.lfStatusFont);
     }
 
     double ScaleSize(int width, int height, int* newWidth, int* newHeight) const throw()
@@ -1592,6 +1712,10 @@ protected:
             DeleteBitmap(this->bitmap);
             this->bitmap = NULL;
         }
+        if (this->name != NULL) {
+            ::SHFree(this->name);
+            this->name = NULL;
+        }
         if (FAILED(DataObject::Clone(dataObject, &this->dataObject))) {
             return DROPEFFECT_NONE;
         }
@@ -1606,6 +1730,10 @@ protected:
             ::GetObject(this->bitmap, sizeof(bm), &bm);
             this->width = bm.bmWidth;
             this->height = bm.bmHeight;
+            ComPtr<IShellItem> item;
+            if (SUCCEEDED(::SHGetItemFromObject(this->dataObject, IID_PPV_ARGS(&item)))) {
+                item->GetDisplayName(SIGDN_NORMALDISPLAY, &this->name);
+            }
         }
         HWND hwnd = NULL;
         if (SUCCEEDED(this->GetWindow(&hwnd))) {
@@ -1619,6 +1747,8 @@ public:
         : bitmap()
         , width()
         , height()
+        , font()
+        , name()
     {
     }
 
@@ -1626,6 +1756,12 @@ public:
     {
         if (this->bitmap != NULL) {
             DeleteBitmap(this->bitmap);
+        }
+        if (this->font != NULL) {
+            DeleteFont(this->font);
+        }
+        if (this->name != NULL) {
+            ::SHFree(this->name);
         }
     }
 
@@ -1636,7 +1772,7 @@ public:
         if (atom == 0) {
             return NULL;
         }
-        return __super::Create(atom, L"Drag Drop", WS_OVERLAPPEDWINDOW, WS_EX_TOOLWINDOW);
+        return __super::Create(atom, NULL, WS_POPUP | WS_SYSMENU | WS_THICKFRAME | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, WS_EX_TOOLWINDOW);
     }
 };
 
@@ -1664,6 +1800,25 @@ public:
     }
 };
 
+class CBufferedPaintInit
+{
+public:
+    HRESULT m_hr;
+
+    CBufferedPaintInit() throw()
+        : m_hr(::BufferedPaintInit())
+    {
+    }
+
+    ~CBufferedPaintInit() throw()
+    {
+        if (SUCCEEDED(m_hr)) {
+            ::BufferedPaintUnInit();
+        }
+    }
+};
+
+
 class CAllocConsole
 {
 public:
@@ -1682,7 +1837,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) throw()
 #ifdef USETRACE
     CAllocConsole con;
 #endif
-    COleInitialize init;
+    COleInitialize ole;
+    CBufferedPaintInit bp;
     MainWindow wnd;
     HWND hwnd = wnd.Create();
     if (hwnd == NULL) {
@@ -1690,8 +1846,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) throw()
     }
     RECT rect = { 0, 0, 256, 256 };
     MyAdjustWindowRect(hwnd, &rect);
-    ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, rect.right - rect.left, rect.bottom - rect.top, SWP_NOMOVE | SWP_NOACTIVATE);
-    ::ShowWindow(hwnd, SW_SHOW);
+    CenterWindowPos(hwnd, HWND_TOPMOST, rect.right - rect.left, rect.bottom - rect.top, SWP_SHOWWINDOW);
     ::UpdateWindow(hwnd);
     MSG msg;
     msg.wParam = EXIT_FAILURE;
