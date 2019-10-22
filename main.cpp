@@ -12,7 +12,9 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <thumbcache.h>
 #include <wincodec.h>
+#include <dwmapi.h>
 #include <uxtheme.h>
 #include <vsstyle.h>
 #include <vssym32.h>
@@ -43,6 +45,10 @@ extern "C" IMAGE_DOS_HEADER     __ImageBase;
     ((fn)((hwnd), (HWND)(wParam), (int)GET_X_LPARAM(lParam), (int)GET_Y_LPARAM(lParam)), 0L)
 #define FORWARD_WM_CONTEXTMENU(hwnd, hwndContext, xPos, yPos, fn) \
     (void)(fn)((hwnd), WM_CONTEXTMENU, (WPARAM)(HWND)(hwndContext), MAKELPARAM((int)(xPos), (int)(yPos)))
+
+#define HANDLE_WM_DWMCOMPOSITIONCHANGED(hwnd, wParam, lParam, fn) \
+    ((fn)((hwnd)), 0L)
+
 
 #define FAIL_HR(hr) if (FAILED((hr))) goto Fail
 
@@ -568,17 +574,17 @@ void SetWindowBlur(HWND hwnd)
     if (hmod != NULL) {
         struct ACCENTPOLICY
         {
-            int nAccentState;
-            int nFlags;
-            int nColor;
-            int nAnimationId;
+            int AccentState;
+            int Flags;
+            int Color;
+            int AnimationId;
         };
 
         struct WINCOMPATTRDATA
         {
-            int nAttribute;
+            int Attribute;
             PVOID pData;
-            ULONG cbData;
+            SIZE_T cbData;
         };
 
         // Might be broken in the future due to this undocumented API
@@ -1318,19 +1324,190 @@ public:
 };
 
 
-class MainWindow : public BaseWindow<MainWindow>, public DropTargetExImpl<MainWindow>
+template <class T>
+class ResizableWindow
+{
+private:
+    static const int SIZE_FRAME = 8;
+    static const int SIZE_INNERFRAME = 16;
+
+public:
+    ResizableWindow() throw()
+    {
+    }
+
+    ~ResizableWindow() throw()
+    {
+    }
+
+    bool ProcessWindowMessages(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, __out LRESULT* result) throw()
+    {
+        *result = 0;
+        switch (message) {
+        case WM_SETCURSOR:
+            return this->OnSetCursor(hwnd, wParam, lParam, result);
+        case WM_NCHITTEST:
+            return this->OnNcHitTest(hwnd, wParam, lParam, result);
+        case WM_NCLBUTTONDOWN:
+            return this->OnNcLButtonDown(hwnd, wParam, lParam, result);
+        }
+        return false;
+    }
+
+private:
+    bool OnSetCursor(HWND, WPARAM, LPARAM lParam, __out_opt LRESULT* result) throw()
+    {
+        UINT htCode = LOWORD(lParam);
+#define IDCtoCUR(idc) (LOBYTE(idc))
+#define CURtoIDC(cur) MAKEINTRESOURCE((cur) | 0x7F00)
+        static const BYTE htsizCurs[HTSIZELAST - HTSIZEFIRST + 1] =
+        {
+            IDCtoCUR(IDC_SIZEWE),   // HTLEFT
+            IDCtoCUR(IDC_SIZEWE),   // HTRIGHT
+            IDCtoCUR(IDC_SIZENS),   // HTTOP
+            IDCtoCUR(IDC_SIZENWSE), // HTTOPLEFT
+            IDCtoCUR(IDC_SIZENESW), // HTTOPRIGHT
+            IDCtoCUR(IDC_SIZENS),   // HTBOTTOM
+            IDCtoCUR(IDC_SIZENESW), // HTBOTTOMLEFT
+            IDCtoCUR(IDC_SIZENWSE), // HTBOTTOMRIGHT
+        };
+
+        LPCTSTR cursor = IDC_ARROW;
+        if (static_cast<UINT>(htCode - HTSIZEFIRST) <= (HTSIZELAST - HTSIZEFIRST)) {
+            cursor = CURtoIDC(htsizCurs[htCode - HTSIZEFIRST]);
+        }
+        ::SetCursor(::LoadCursor(NULL, cursor));
+#undef IDCtoCUR
+#undef CURtoIDC
+        *result = TRUE;
+        return true;
+    }
+
+    bool OnNcHitTest(HWND hwnd, WPARAM, LPARAM lParam, __out_opt LRESULT* result) throw()
+    {
+        RECT outerRect = {};
+        ::GetWindowRect(hwnd, &outerRect);
+        RECT innerRect = outerRect;
+        ::InflateRect(&outerRect, -SIZE_FRAME, -SIZE_FRAME);
+        ::InflateRect(&innerRect, -SIZE_INNERFRAME, -SIZE_INNERFRAME);
+
+        static const signed char hitTests[3][5] =
+        {
+            { HTTOPLEFT,    HTTOPLEFT,    HTTOP,    HTTOPRIGHT,    HTTOPRIGHT    },
+            { HTLEFT,       HTCLIENT,     HTCLIENT, HTCLIENT,      HTRIGHT       },
+            { HTBOTTOMLEFT, HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT, HTBOTTOMRIGHT },
+        };
+
+        int x = GET_X_LPARAM(lParam);
+        int y = GET_Y_LPARAM(lParam);
+        UINT col = (x >= outerRect.left) + (x >= innerRect.left) + (x >= innerRect.right) + (x >= outerRect.right);
+        UINT row = (y >= outerRect.top)  + (y >= outerRect.bottom);
+        *result = hitTests[row][col];
+        return true;
+    }
+
+    bool OnNcLButtonDown(HWND hwnd, WPARAM wParam, LPARAM lParam, __out_opt LRESULT*) throw()
+    {
+        UINT htCode = static_cast<UINT>(wParam);
+        UINT idCmd;
+        if (static_cast<UINT>(htCode - HTSIZEFIRST) <= (HTSIZELAST - HTSIZEFIRST)) {
+            idCmd = SC_SIZE + (htCode - HTSIZEFIRST + 1);
+            ::SendMessage(hwnd, WM_SYSCOMMAND, idCmd, lParam);
+            return true;
+        }
+        return false;
+    }
+};
+
+
+class MagneticWindow
+{
+private:
+    POINT hotspot;
+    bool dragging;
+    static const UINT SNAP_PIXELS = 20;
+
+    void AdjustPoint(HWND hwnd, __inout POINT* pt)
+    {
+        if (::GetAsyncKeyState(VK_SHIFT) >= 0) {
+            RECT workRect = {};
+            GetWorkAreaRect(hwnd, &workRect);
+            RECT rect = {};
+            ::GetWindowRect(hwnd, &rect);
+            pt->x = DoSnap(pt->x, workRect.left);
+            pt->y = DoSnap(pt->y, workRect.top);
+            pt->x = DoSnap(pt->x, workRect.right - (rect.right - rect.left));
+            pt->y = DoSnap(pt->y, workRect.bottom - (rect.bottom - rect.top));
+        }
+    }
+
+    static LONG DoSnap(LONG a, LONG b)
+    {
+        return (static_cast<ULONG>(::labs(b - a)) < SNAP_PIXELS) ? b : a;
+    }
+
+public:
+    MagneticWindow() throw()
+        : hotspot()
+        , dragging()
+    {
+    }
+
+    ~MagneticWindow() throw()
+    {
+    }
+
+    void BeginDrag(HWND hwnd, int x, int y) throw()
+    {
+        this->hotspot.x = x;
+        this->hotspot.y = y;
+        ::SetCapture(hwnd);
+        this->dragging = true;
+    }
+
+    void EndDrag() throw()
+    {
+        this->dragging = false;
+        ::ReleaseCapture();
+    }
+
+    void Drag(HWND hwnd, int x, int y) throw()
+    {
+        if (this->dragging && ::GetCapture() == hwnd) {
+            POINT pt = {
+                x - this->hotspot.x,
+                y - this->hotspot.y
+            };
+            ::ClientToScreen(hwnd, &pt);
+            this->AdjustPoint(hwnd, &pt);
+            ::SetWindowPos(hwnd, NULL, pt.x, pt.y, 0, 0, SWP_NOSIZE);
+        }
+    }
+};
+
+
+#include "res.rc"
+
+class MainWindow : public BaseWindow<MainWindow>, public ResizableWindow<MainWindow>, public DropTargetExImpl<MainWindow>
 {
 protected:
     friend BaseWindow<MainWindow>;
     friend DropTargetImpl<MainWindow>;
     friend DropTargetExImpl<MainWindow>;
 
+    HWND toolbar;
+    HIMAGELIST closeImage;
     HBITMAP bitmap;
+    HBITMAP bitmapPM;
     int width;
     int height;
     HFONT font;
+    int textHeight;
     LPWSTR name;
     ComPtr<IDataObject> dataObject;
+    MagneticWindow mag;
+
+    static const int BTN_SIZE = 16;
 
     static void ErrorMessage(HWND hwnd, LPCWSTR name) throw()
     {
@@ -1342,6 +1519,11 @@ protected:
 
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) throw()
     {
+        LRESULT result;
+        if (ResizableWindow<MainWindow>::ProcessWindowMessages(hwnd, message, wParam, lParam, &result)) {
+            return result;
+        }
+
         switch (message) {
         HANDLE_MSG(hwnd, WM_CREATE, OnCreate);
         HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
@@ -1349,6 +1531,7 @@ protected:
         HANDLE_MSG(hwnd, WM_WINDOWPOSCHANGED, OnWindowPosChanged);
         HANDLE_MSG(hwnd, WM_SETTINGCHANGE, OnSettingChange);
         HANDLE_MSG(hwnd, WM_ACTIVATE, OnActivate);
+        HANDLE_MSG(hwnd, WM_NCCALCSIZE, OnNcCalcSize);
         HANDLE_MSG(hwnd, WM_NOTIFY, OnNotify);
         HANDLE_MSG(hwnd, WM_INITMENU, OnInitMenu);
         HANDLE_MSG(hwnd, WM_INITMENUPOPUP, OnInitMenuPopup);
@@ -1356,7 +1539,10 @@ protected:
         HANDLE_MSG(hwnd, WM_LBUTTONDOWN, OnButtonDown);
         HANDLE_MSG(hwnd, WM_RBUTTONDOWN, OnButtonDown);
         HANDLE_MSG(hwnd, WM_MBUTTONDOWN, OnButtonDown);
+        HANDLE_MSG(hwnd, WM_MOUSEMOVE, OnMouseMove);
+        HANDLE_MSG(hwnd, WM_LBUTTONUP, OnLButtonUp);
         HANDLE_MSG(hwnd, WM_PAINT, OnPaint);
+        HANDLE_MSG(hwnd, WM_DWMCOMPOSITIONCHANGED, OnDwmCompositionChanged);
         }
         return ::DefWindowProc(hwnd, message, wParam, lParam);
     }
@@ -1367,12 +1553,13 @@ protected:
             return false;
         }
         this->RegisterDragDrop(hwnd);
-        this->InitFont();
+        this->InitFont(hwnd);
+        this->InitCloseButton(hwnd);
+        this->InitDwmAttrs(hwnd);
         HMENU menu = ::GetSystemMenu(hwnd, FALSE);
         ::RemoveMenu(menu, SC_RESTORE, MF_BYCOMMAND);
         ::RemoveMenu(menu, SC_MINIMIZE, MF_BYCOMMAND);
         ::RemoveMenu(menu, SC_MAXIMIZE, MF_BYCOMMAND);
-        ::SetWindowBlur(hwnd);
         return true;
     }
 
@@ -1383,8 +1570,11 @@ protected:
         ::PostQuitMessage(0);
     }
 
-    void OnCommand(HWND, int, HWND, UINT) throw()
+    void OnCommand(HWND hwnd, int id, HWND, UINT) throw()
     {
+        if (id == SC_CLOSE) {
+            ::PostMessage(hwnd, WM_CLOSE, 0, 0);
+        }
     }
 
     void OnWindowPosChanged(HWND hwnd, const WINDOWPOS* pwp) throw()
@@ -1398,23 +1588,70 @@ protected:
             // }
         // }
         if ((pwp->flags & SWP_NOSIZE) == 0) {
+            if (this->toolbar != NULL) {
+                RECT rect = {}, btnRect = {};
+                ::GetClientRect(hwnd, &rect);
+                ::SendMessage(this->toolbar, TB_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&btnRect));
+                ::SetWindowPos(this->toolbar, NULL, rect.right - btnRect.right - 4, 4, btnRect.right, btnRect.bottom, 0);
+            }
             ::InvalidateRect(hwnd, NULL, FALSE);
         }
     }
 
     void OnSettingChange(HWND hwnd, UINT, LPCTSTR) throw()
     {
-        this->InitFont();
+        this->InitFont(hwnd);
+        this->InitDwmAttrs(hwnd);
         ::InvalidateRect(hwnd, NULL, FALSE);
     }
 
-    void OnActivate(HWND, UINT, HWND, BOOL) throw()
+    void OnActivate(HWND hwnd, UINT, HWND, BOOL) throw()
     {
+        ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
     }
 
-    LRESULT OnNotify(HWND, int, NMHDR*) throw()
+    UINT OnNcCalcSize(HWND, BOOL, NCCALCSIZE_PARAMS*) throw()
     {
         return 0;
+    }
+
+    LRESULT OnNotify(HWND, int, NMHDR* pnmh) throw()
+    {
+        if (pnmh->code == NM_CUSTOMDRAW && this->toolbar != NULL && pnmh->hwndFrom == this->toolbar) {
+            LPNMTBCUSTOMDRAW tbcd = CONTAINING_RECORD(pnmh, NMTBCUSTOMDRAW, nmcd.hdr);
+            switch (tbcd->nmcd.dwDrawStage) {
+            case CDDS_PREPAINT:
+                return this->OnNotifyPrePaintTBCD(tbcd);
+
+            case CDDS_ITEMPREPAINT:
+                return this->OnNotifyItemPrePaintTBCD(tbcd);
+            }
+            return 0;
+        }
+        return 0;
+    }
+
+    LRESULT OnNotifyPrePaintTBCD(LPNMTBCUSTOMDRAW tbcd) throw()
+    {
+        RECT rect = tbcd->nmcd.rc;
+        ::PatBlt(tbcd->nmcd.hdc, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, BLACKNESS);
+        return CDRF_NOTIFYITEMDRAW;
+    }
+
+    LRESULT OnNotifyItemPrePaintTBCD(LPNMTBCUSTOMDRAW tbcd) throw()
+    {
+        this->OnNotifyPrePaintTBCD(tbcd);
+        const UINT state = tbcd->nmcd.uItemState;
+        int image = -1;
+        if (state & CDIS_SELECTED) {
+            image = 1;
+        } else if (state & CDIS_HOT) {
+            image = 0;
+        }
+        if (image >= 0) {
+            ::ImageList_Draw(this->closeImage, image, tbcd->nmcd.hdc, tbcd->nmcd.rc.left, tbcd->nmcd.rc.top, ILD_NORMAL);
+        }
+        return CDRF_SKIPDEFAULT;
     }
 
     void OnInitMenu(HWND, HMENU) throw()
@@ -1431,24 +1668,55 @@ protected:
         FORWARD_WM_CONTEXTMENU(hwnd, hwndContext, xPos, yPos, ::DefWindowProc);
     }
 
-    void OnButtonDown(HWND hwnd, BOOL, int, int, UINT) throw()
+    void OnButtonDown(HWND hwnd, BOOL, int x, int y, UINT flags) throw()
     {
         if (this->dataObject != NULL) {
             POINT pt = {};
             ::GetCursorPos(&pt);
             RECT rect = {};
             ::GetClientRect(hwnd, &rect);
+            SIZE size = { rect.right, rect.bottom };
             ::InflateRect(&rect, -16, -16);
             MapWindowRect(hwnd, HWND_DESKTOP, &rect);
             if (::PtInRect(&rect, pt)) {
                 if (MyDragDetect(hwnd, pt)) {
+                    ComPtr<IDragSourceHelper2> helper;
+                    if (SUCCEEDED(::CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&helper)))) {
+                        int left, top, width, height;
+                        GetBitmapArea(size, &left, &top, &width, &height);
+                        SHDRAGIMAGE shdi = {
+                            { this->width, this->height },
+                            {
+                                ::MulDiv(x - left, this->width, width),
+                                ::MulDiv(y - top, this->height, height)
+                            },
+                            static_cast<HBITMAP>(::CopyImage(this->bitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION)),
+                            0
+                        };
+                        if (FAILED(helper->InitializeFromBitmap(&shdi, this->dataObject))) {
+                            DeleteBitmap(shdi.hbmpDragImage);
+                        }
+                        helper->SetFlags(DSH_ALLOWDROPDESCRIPTIONTEXT);
+                    }
                     DWORD effect = DROPEFFECT_COPY;
                     ::SHDoDragDrop(hwnd, this->dataObject, NULL, effect, &effect);
                 }
                 return;
             }
         }
-        ::SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        if (flags & MK_LBUTTON) {
+            this->mag.BeginDrag(hwnd, x, y);
+        }
+    }
+
+    void OnMouseMove(HWND hwnd, int x, int y, UINT) throw()
+    {
+        this->mag.Drag(hwnd, x, y);
+    }
+
+    void OnLButtonUp(HWND, int, int, UINT) throw()
+    {
+        this->mag.EndDrag();
     }
 
     void OnPaint(HWND hwnd) throw()
@@ -1470,60 +1738,75 @@ protected:
         }
     }
 
-    void PaintContent(HWND hwnd, HDC hdc, const SIZE size)
+    void OnDwmCompositionChanged(HWND hwnd) throw()
+    {
+        this->InitDwmAttrs(hwnd);
+    }
+
+    void PaintContent(HWND hwnd, HDC hdc, const SIZE size) throw()
     {
         this->DrawBitmap(hwnd, hdc, size);
         this->DrawText(hwnd, hdc, size);
     }
 
-    void DrawBitmap(HWND, HDC hdc, const SIZE size)
+    void GetBitmapArea(__in SIZE size, __out int* x, __out int* y, __out int* width, __out int* height) throw()
     {
-        if (this->bitmap != NULL) {
-            int width, height;
-            double scale = this->ScaleSize(size.cx, size.cy, &width, &height);
-            scale; // unused
-            int x = (size.cx - width) / 2;
-            int y = (size.cy - height) / 2;
+        if (size.cy >= this->textHeight) {
+            size.cy -= this->textHeight;
+        }
+        double scale = this->ScaleSize(size.cx, size.cy, width, height);
+        scale; // unused
+        *x = (size.cx - *width) / 2;
+        *y = (size.cy - *height) / 2;
+    }
+
+    void DrawBitmap(HWND, HDC hdc, SIZE size) throw()
+    {
+        if (this->bitmapPM != NULL) {
+            int x, y, width, height;
+            GetBitmapArea(size, &x, &y, &width, &height);
             HDC hdcMem = ::CreateCompatibleDC(hdc);
-            HBITMAP bmpOld = SelectBitmap(hdcMem, this->bitmap);
+            HBITMAP bmpOld = SelectBitmap(hdcMem, this->bitmapPM);
             BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            int mode = ::SetStretchBltMode(hdc, HALFTONE);
             ::GdiAlphaBlend(hdc, x, y, width, height, hdcMem, 0, 0, this->width, this->height, bf);
+            ::SetStretchBltMode(hdc, mode);
             SelectBitmap(hdcMem, bmpOld);
             ::DeleteDC(hdcMem);
         }
     }
 
-    void DrawText(HWND hwnd, HDC hdc, const SIZE size)
+    void DrawText(HWND hwnd, HDC hdc, const SIZE size) throw()
     {
         if (this->name != NULL) {
-            HFONT fontOld = SelectFont(hdc, this->font);
-            TEXTMETRIC tm = {};
-            ::GetTextMetrics(hdc, &tm);
-            RECT rect = { 0, size.cy - tm.tmHeight - 8, size.cx, size.cy };
-            if (rect.top < 0) {
-                rect.top = 0;
-            }
-            DTTOPTS dtto = { sizeof(dtto) };
-            dtto.dwFlags = DTT_TEXTCOLOR | DTT_COMPOSITED;
-            dtto.crText = 0;
-            HTHEME theme = ::OpenThemeData(hwnd, L"globals");
-            for (int y = -1; y <= 1; y++) {
-                for (int x = -1; x <= 1; x++) {
-                    if (x != 0 && y != 0) {
-                        RECT shadowRect = rect;
-                        ::OffsetRect(&shadowRect, x, y);
-                        ::DrawThemeTextEx(theme, hdc, TEXT_BODYTITLE, 0, this->name, -1, DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, &shadowRect, &dtto);
+            if (size.cy > this->textHeight) {
+                HFONT fontOld = SelectFont(hdc, this->font);
+                RECT rect = { 0, size.cy - this->textHeight, size.cx, size.cy };
+                if (rect.top < 0) {
+                    rect.top = 0;
+                }
+                DTTOPTS dtto = { sizeof(dtto) };
+                dtto.dwFlags = DTT_TEXTCOLOR | DTT_COMPOSITED;
+                dtto.crText = 0;
+                HTHEME theme = ::OpenThemeData(hwnd, L"globals");
+                for (int y = -1; y <= 1; y++) {
+                    for (int x = -1; x <= 1; x++) {
+                        if (x != 0 && y != 0) {
+                            RECT shadowRect = rect;
+                            ::OffsetRect(&shadowRect, x, y);
+                            ::DrawThemeTextEx(theme, hdc, TEXT_BODYTITLE, 0, this->name, -1, DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, &shadowRect, &dtto);
+                        }
                     }
                 }
+                dtto.crText = 0xffffff;
+                ::DrawThemeTextEx(theme, hdc, TEXT_BODYTITLE, 0, this->name, -1, DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, &rect, &dtto);
+                ::CloseThemeData(theme);
+                SelectFont(hdc, fontOld);
             }
-            dtto.crText = 0xffffff;
-            ::DrawThemeTextEx(theme, hdc, TEXT_BODYTITLE, 0, this->name, -1, DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, &rect, &dtto);
-            ::CloseThemeData(theme);
-            SelectFont(hdc, fontOld);
         }
     }
 
-    void InitFont()
+    void InitFont(HWND hwnd) throw()
     {
         if (this->font != NULL) {
             DeleteFont(this->font);
@@ -1535,6 +1818,54 @@ protected:
         ncm.lfStatusFont.lfWeight += FW_BOLD;
         ncm.lfStatusFont.lfQuality = ANTIALIASED_QUALITY;
         this->font = ::CreateFontIndirect(&ncm.lfStatusFont);
+        HDC hdc = ::GetDC(hwnd);
+        HFONT fontOld = SelectFont(hdc, this->font);
+        TEXTMETRIC tm = {};
+        ::GetTextMetrics(hdc, &tm);
+        this->textHeight = tm.tmHeight + 8;
+        SelectFont(hdc, fontOld);
+        ::ReleaseDC(hwnd, hdc);
+    }
+
+    void InitCloseButton(HWND hwnd) throw()
+    {
+        const DWORD WS_TOOLBAR_DEFAULT
+            = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
+            | CCS_TOP | CCS_NODIVIDER | CCS_NORESIZE | CCS_NOPARENTALIGN
+            | TBSTYLE_TOOLTIPS | TBSTYLE_FLAT | TBSTYLE_TRANSPARENT;
+        const TBBUTTON btn = { 0, SC_CLOSE, TBSTATE_ENABLED, BTNS_BUTTON, 0, 0 };
+        HWND toolbar = ::CreateToolbarEx(
+                            hwnd
+                            , WS_TOOLBAR_DEFAULT
+                            , 1, 0, NULL, 0, &btn, 1
+                            , BTN_SIZE, BTN_SIZE, 0, 0, sizeof(TBBUTTON));
+        if (toolbar == NULL) {
+            return;
+        }
+        ::SendMessage(toolbar, TB_SETPARENT, reinterpret_cast<WPARAM>(hwnd), 0);
+        ::SendMessage(toolbar, CCM_SETVERSION, 6, 0);
+        ::SendMessage(toolbar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DOUBLEBUFFER);
+        TBMETRICS tbm = { sizeof(tbm), TBMF_PAD | TBMF_BUTTONSPACING };
+        ::SendMessage(toolbar, TB_SETMETRICS, 0, reinterpret_cast<LPARAM>(&tbm));
+        ::SendMessage(toolbar, TB_SETBITMAPSIZE, 0, MAKELPARAM(BTN_SIZE, BTN_SIZE));
+        ::SendMessage(toolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(BTN_SIZE, BTN_SIZE));
+        ::SendMessage(toolbar, TB_AUTOSIZE, 0, 0);
+        this->toolbar = toolbar;
+        this->closeImage = ::ImageList_LoadImage(HINST_THISCOMPONENT, MAKEINTRESOURCE(IDB_CLOSE), BTN_SIZE, 0, 0, IMAGE_BITMAP, LR_CREATEDIBSECTION);
+    }
+
+    static HRESULT DwmSetWindowAttributeDword(HWND hwnd, DWMWINDOWATTRIBUTE attribute, DWORD value) throw()
+    {
+        return ::DwmSetWindowAttribute(hwnd, attribute, &value, sizeof(value));
+    }
+
+    void InitDwmAttrs(HWND hwnd) throw()
+    {
+        static const MARGINS margins = { -1, -1, -1, -1 };
+        ::DwmExtendFrameIntoClientArea(hwnd, &margins);
+        DwmSetWindowAttributeDword(hwnd, DWMWA_ALLOW_NCPAINT, true);
+        DwmSetWindowAttributeDword(hwnd, DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED);
+        ::SetWindowBlur(hwnd);
     }
 
     double ScaleSize(int width, int height, int* newWidth, int* newHeight) const throw()
@@ -1569,32 +1900,70 @@ protected:
 
     DROPEFFECT OnDrop(IDataObject* dataObject, DWORD, POINT) throw()
     {
-        if (DataObject::IsMyDataObject(dataObject)) {
-            return DROPEFFECT_NONE;
+        if (this->SetObject(dataObject)) {
+            return DROPEFFECT_COPY;
+        }
+        return DROPEFFECT_NONE;
+    }
+
+    static HRESULT GetBitmap(__in IDataObject* dataObject, __out HBITMAP* bmp) throw()
+    {
+        const int IMAGE_SIZE = 256;
+        *bmp = NULL;
+        ComPtr<IShellItem> item;
+        HRESULT hr = ::SHGetItemFromDataObject(dataObject, DOGIF_DEFAULT, IID_PPV_ARGS(&item));
+        if (FAILED(hr)) {
+            return hr;
+        }
+        ComPtr<IThumbnailProvider> thump;
+        hr = item->BindToHandler(NULL, BHID_ThumbnailHandler, IID_PPV_ARGS(&thump));
+        if (SUCCEEDED(hr)) {
+            WTS_ALPHATYPE alpha = WTSAT_UNKNOWN;
+            hr = thump->GetThumbnail(IMAGE_SIZE, bmp, &alpha);
+            if (SUCCEEDED(hr)) {
+                if (alpha == WTSAT_ARGB) {
+                    return hr;
+                }
+                DeleteBitmap(*bmp);
+                *bmp = NULL;
+            }
+        }
+        ComPtr<IShellItemImageFactory> factory;
+        hr = item->QueryInterface(IID_PPV_ARGS(&factory));
+        if (SUCCEEDED(hr)) {
+            const SIZE size = { IMAGE_SIZE, IMAGE_SIZE };
+            hr = factory->GetImage(size, SIIGBF_BIGGERSIZEOK, bmp);
+        }
+        return hr;
+    }
+
+    bool SetObject(IDataObject* dataObject) throw()
+    {
+        if (dataObject == NULL || DataObject::IsMyDataObject(dataObject)) {
+            return false;
         }
         this->dataObject.Release();
         if (this->bitmap != NULL) {
             DeleteBitmap(this->bitmap);
             this->bitmap = NULL;
         }
+        if (this->bitmapPM != NULL) {
+            DeleteBitmap(this->bitmapPM);
+            this->bitmapPM = NULL;
+        }
         if (this->name != NULL) {
             ::SHFree(this->name);
             this->name = NULL;
         }
         if (FAILED(DataObject::Clone(dataObject, &this->dataObject))) {
-            return DROPEFFECT_NONE;
+            return false;
         }
-        ComPtr<IShellItemImageFactory> factory;
-        HRESULT hr = ::SHGetItemFromDataObject(this->dataObject, DOGIF_DEFAULT, IID_PPV_ARGS(&factory));
+        HRESULT hr = GetBitmap(this->dataObject, &this->bitmap);
         if (SUCCEEDED(hr)) {
-            const SIZE size = { 256, 256 };
-            hr = factory->GetImage(size, SIIGBF_RESIZETOFIT, &this->bitmap);
-        }
-        if (SUCCEEDED(hr)) {
-            BITMAP bm = {};
-            ::GetObject(this->bitmap, sizeof(bm), &bm);
-            this->width = bm.bmWidth;
-            this->height = bm.bmHeight;
+            SIZE size;
+            this->bitmapPM = Premultiply(this->bitmap, &size);
+            this->width = size.cx;
+            this->height = size.cy;
             ComPtr<IShellItem> item;
             if (SUCCEEDED(::SHGetItemFromObject(this->dataObject, IID_PPV_ARGS(&item)))) {
                 item->GetDisplayName(SIGDN_NORMALDISPLAY, &this->name);
@@ -1604,23 +1973,69 @@ protected:
         if (SUCCEEDED(this->GetWindow(&hwnd))) {
             ::InvalidateRect(hwnd, NULL, FALSE);
         }
-        return DROPEFFECT_COPY;
+        return true;
+    }
+
+    static HBITMAP Premultiply(__in HBITMAP bmp, __out SIZE* size) throw()
+    {
+        BITMAP bm = {};
+        ::GetObject(bmp, sizeof(bm), &bm);
+        const int width = bm.bmWidth;
+        const int height = bm.bmHeight;
+        size->cx = width;
+        size->cy = height;
+        if (width <= 0 || height <= 0) {
+            return NULL;
+        }
+        HDC hdc = ::CreateCompatibleDC(NULL);
+        DWORD* image;
+        BITMAPINFO bi = { { sizeof(bi.bmiHeader), width, -height, 1, 32 } };
+        HBITMAP bmpPM = ::CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&image), NULL, 0);
+        if (bmpPM != NULL) {
+            if (::GetDIBits(hdc, bmp, 0, height, image, &bi, DIB_RGB_COLORS) == height) {
+                size_t size = width * height;
+                DWORD* ptr = image;
+                while (size--) {
+                    BYTE b = *ptr & 0xff;
+                    BYTE g = (*ptr >> 8) & 0xff;
+                    BYTE r = (*ptr >> 16) & 0xff;
+                    BYTE a = (*ptr >> 24) & 0xff;
+                    b = ((static_cast<UINT>(b) * a) >> 8) & 0xff;
+                    g = ((static_cast<UINT>(g) * a) >> 8) & 0xff;
+                    r = ((static_cast<UINT>(r) * a) >> 8) & 0xff;
+                    *ptr = (a << 24) | (r << 16) | (g << 8) | b;
+                    ptr++;
+                }
+            }
+        }
+        ::DeleteDC(hdc);
+        return bmpPM;
     }
 
 public:
     MainWindow() throw()
-        : bitmap()
+        : toolbar()
+        , closeImage()
+        , bitmap()
+        , bitmapPM()
         , width()
         , height()
         , font()
+        , textHeight()
         , name()
     {
     }
 
     ~MainWindow() throw()
     {
+        if (this->closeImage != NULL) {
+            ::ImageList_Destroy(this->closeImage);
+        }
         if (this->bitmap != NULL) {
             DeleteBitmap(this->bitmap);
+        }
+        if (this->bitmapPM != NULL) {
+            DeleteBitmap(this->bitmapPM);
         }
         if (this->font != NULL) {
             DeleteFont(this->font);
@@ -1637,7 +2052,26 @@ public:
         if (atom == 0) {
             return NULL;
         }
-        return __super::Create(atom, NULL, WS_POPUP | WS_SYSMENU | WS_THICKFRAME | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, WS_EX_TOOLWINDOW);
+        return __super::Create(atom, NULL, WS_POPUP | WS_SYSMENU | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, WS_EX_TOOLWINDOW);
+    }
+
+    void AdjustWindowPos(HWND hwnd, int width, int height) throw()
+    {
+        RECT rect = { 0, 0, width, height + this->textHeight };
+        MyAdjustWindowRect(hwnd, &rect);
+        CenterWindowPos(hwnd, HWND_TOPMOST, rect.right - rect.left, rect.bottom - rect.top, SWP_SHOWWINDOW);
+        ::UpdateWindow(hwnd);
+    }
+
+    void SetItem(IShellItem* item) throw()
+    {
+        if (item == NULL) {
+            return;
+        }
+        ComPtr<IDataObject> dataObject;
+        if (SUCCEEDED(item->BindToHandler(NULL, BHID_DataObject, IID_PPV_ARGS(&dataObject)))) {
+            this->SetObject(dataObject);
+        }
     }
 };
 
@@ -1697,7 +2131,7 @@ public:
     }
 };
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) throw()
+int Main(int argc, __in_ecount(argc + 1) LPWSTR* argv) throw()
 {
 #ifdef USETRACE
     CAllocConsole con;
@@ -1709,10 +2143,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) throw()
     if (hwnd == NULL) {
         return EXIT_FAILURE;
     }
-    RECT rect = { 0, 0, 256, 256 };
-    MyAdjustWindowRect(hwnd, &rect);
-    CenterWindowPos(hwnd, HWND_TOPMOST, rect.right - rect.left, rect.bottom - rect.top, SWP_SHOWWINDOW);
-    ::UpdateWindow(hwnd);
+    wnd.AdjustWindowPos(hwnd, 256, 256);
+    if (argc > 1) {
+        ComPtr<IShellItem> item;
+        if (FAILED(::SHCreateItemFromParsingName(argv[1], NULL, IID_PPV_ARGS(&item)))) {
+            WCHAR fullpath[MAX_PATH];
+            if (::GetFullPathNameW(argv[1], ARRAYSIZE(fullpath), fullpath, NULL)) {
+                ::SHCreateItemFromParsingName(fullpath, NULL, IID_PPV_ARGS(&item));
+            }
+        }
+        wnd.SetItem(item);
+    }
     MSG msg;
     msg.wParam = EXIT_FAILURE;
     while (::GetMessage(&msg, NULL, 0, 0)) {
@@ -1720,4 +2161,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) throw()
         ::TranslateMessage(&msg);
     }
     return static_cast<int>(msg.wParam);
+}
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) throw()
+{
+    int argc = 0;
+    LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
+    if (argv == NULL) {
+        return 255;
+    }
+    return Main(argc, argv);
 }

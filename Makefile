@@ -25,7 +25,7 @@ LDFLAGS = /nologo /time /dynamicbase:no /ltcg /machine:$(TARGET_ARCH) /map:"$(TA
 RFLAGS = /d "NDEBUG" /l 0
 
 CDEFS = /D "NDEBUG" /D "_STATIC_CPPLIB" /D "_WINDOWS"
-LDLIBS = kernel32.lib user32.lib gdi32.lib comdlg32.lib comctl32.lib shell32.lib shlwapi.lib ole32.lib windowscodecs.lib uxtheme.lib
+LDLIBS = kernel32.lib user32.lib gdi32.lib comdlg32.lib comctl32.lib shell32.lib shlwapi.lib ole32.lib windowscodecs.lib uxtheme.lib dwmapi.lib
 
 all: "$(INTDIR)" "$(OUTDIR)" "$(TARGET_EXE)"
 

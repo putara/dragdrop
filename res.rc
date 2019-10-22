@@ -1,5 +1,6 @@
 // resource
 #define IDR_MAIN                100
+#define IDB_CLOSE               101
 
 #define VER_NUMBER              1, 0, 0, 0
 #define VER_STRING              "1, 0, 0, 0"
@@ -77,5 +78,7 @@ FILETYPE            VFT_APP
         VALUE "Translation", 0x0 0x04B0
     }
 }
+
+IDB_CLOSE BITMAP "res/close.bmp"
 
 #endif // RC_INVOKED
