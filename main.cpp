@@ -24,6 +24,7 @@
 
 #include <strsafe.h>
 
+#pragma warning(disable: 4127)
 //#define USETRACE
 
 // https://blogs.msdn.microsoft.com/oldnewthing/20041025-00/?p=37483/
@@ -859,6 +860,33 @@ public:
         return S_OK;
     }
 
+    static bool IsBlacklisted(const FORMATETC& fetc) throw()
+    {
+        if ((fetc.dwAspect & DVASPECT_CONTENT) == 0) {
+            return true;
+        }
+        WCHAR name[MAX_PATH];
+        if (::GetClipboardFormatNameW(fetc.cfFormat, name, ARRAYSIZE(name)) == 0) {
+            return false;
+        }
+        static const WCHAR c_excludes[] =
+            L"UsingDefaultDragImage\0"
+            L"DragContext\0"
+            L"DragWindow\0"
+            L"DisableDragText\0"
+            L"ComputedDragImage\0"
+            L"InShellDragLoop\0"
+            L"PersistedDataObject\0";
+        LPCWSTR p = c_excludes;
+        while (*p != 0) {
+            if (::wcscmp(name, p) == 0) {
+                return true;
+            }
+            p += ::wcslen(p) + 1;
+        }
+        return false;
+    }
+
     static HRESULT Clone(IDataObject* dataObjectSrc, __deref_out IDataObject** dataObjectDst) throw()
     {
         *dataObjectDst = NULL;
@@ -877,6 +905,9 @@ public:
                     if (hr != S_OK) {
                         hr = S_OK;
                         break;
+                    }
+                    if (IsBlacklisted(item.fetc)) {
+                        continue;
                     }
                     hr = dataObjectSrc->GetData(&item.fetc, &item.medium);
                     if (FAILED(hr)) {
@@ -1508,6 +1539,7 @@ protected:
     MagneticWindow mag;
 
     static const int BTN_SIZE = 16;
+    static const int BTN_MARGIN = 4;
 
     static void ErrorMessage(HWND hwnd, LPCWSTR name) throw()
     {
@@ -1543,6 +1575,7 @@ protected:
         HANDLE_MSG(hwnd, WM_LBUTTONUP, OnLButtonUp);
         HANDLE_MSG(hwnd, WM_PAINT, OnPaint);
         HANDLE_MSG(hwnd, WM_DWMCOMPOSITIONCHANGED, OnDwmCompositionChanged);
+        HANDLE_MSG(hwnd, WM_GETMINMAXINFO, OnGetMinMaxInfo);
         }
         return ::DefWindowProc(hwnd, message, wParam, lParam);
     }
@@ -1592,7 +1625,7 @@ protected:
                 RECT rect = {}, btnRect = {};
                 ::GetClientRect(hwnd, &rect);
                 ::SendMessage(this->toolbar, TB_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&btnRect));
-                ::SetWindowPos(this->toolbar, NULL, rect.right - btnRect.right - 4, 4, btnRect.right, btnRect.bottom, 0);
+                ::SetWindowPos(this->toolbar, NULL, rect.right - btnRect.right - BTN_MARGIN, BTN_MARGIN, btnRect.right, btnRect.bottom, 0);
             }
             ::InvalidateRect(hwnd, NULL, FALSE);
         }
@@ -1741,6 +1774,12 @@ protected:
     void OnDwmCompositionChanged(HWND hwnd) throw()
     {
         this->InitDwmAttrs(hwnd);
+    }
+
+    void OnGetMinMaxInfo(HWND, LPMINMAXINFO minmax) throw()
+    {
+        minmax->ptMinTrackSize.x = BTN_SIZE + BTN_MARGIN * 2;
+        minmax->ptMinTrackSize.y = BTN_SIZE + BTN_MARGIN * 2;
     }
 
     void PaintContent(HWND hwnd, HDC hdc, const SIZE size) throw()
@@ -1900,7 +1939,12 @@ protected:
 
     DROPEFFECT OnDrop(IDataObject* dataObject, DWORD, POINT) throw()
     {
-        if (this->SetObject(dataObject)) {
+        bool ret = this->SetObject(dataObject);
+        HWND hwnd = NULL;
+        if (SUCCEEDED(this->GetWindow(&hwnd))) {
+            ::InvalidateRect(hwnd, NULL, TRUE);
+        }
+        if (ret) {
             return DROPEFFECT_COPY;
         }
         return DROPEFFECT_NONE;
@@ -1958,20 +2002,16 @@ protected:
         if (FAILED(DataObject::Clone(dataObject, &this->dataObject))) {
             return false;
         }
+        ComPtr<IShellItem> item;
+        if (SUCCEEDED(::SHGetItemFromDataObject(dataObject, DOGIF_TRAVERSE_LINK, IID_PPV_ARGS(&item)))) {
+            item->GetDisplayName(SIGDN_NORMALDISPLAY, &this->name);
+        }
         HRESULT hr = GetBitmap(this->dataObject, &this->bitmap);
         if (SUCCEEDED(hr)) {
             SIZE size;
             this->bitmapPM = Premultiply(this->bitmap, &size);
             this->width = size.cx;
             this->height = size.cy;
-            ComPtr<IShellItem> item;
-            if (SUCCEEDED(::SHGetItemFromObject(this->dataObject, IID_PPV_ARGS(&item)))) {
-                item->GetDisplayName(SIGDN_NORMALDISPLAY, &this->name);
-            }
-        }
-        HWND hwnd = NULL;
-        if (SUCCEEDED(this->GetWindow(&hwnd))) {
-            ::InvalidateRect(hwnd, NULL, FALSE);
         }
         return true;
     }
@@ -2143,7 +2183,6 @@ int Main(int argc, __in_ecount(argc + 1) LPWSTR* argv) throw()
     if (hwnd == NULL) {
         return EXIT_FAILURE;
     }
-    wnd.AdjustWindowPos(hwnd, 256, 256);
     if (argc > 1) {
         ComPtr<IShellItem> item;
         if (FAILED(::SHCreateItemFromParsingName(argv[1], NULL, IID_PPV_ARGS(&item)))) {
@@ -2154,6 +2193,7 @@ int Main(int argc, __in_ecount(argc + 1) LPWSTR* argv) throw()
         }
         wnd.SetItem(item);
     }
+    wnd.AdjustWindowPos(hwnd, 256, 256);
     MSG msg;
     msg.wParam = EXIT_FAILURE;
     while (::GetMessage(&msg, NULL, 0, 0)) {
