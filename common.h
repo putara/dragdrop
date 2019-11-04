@@ -1,3 +1,6 @@
+#ifndef COMMON_H
+#define COMMON_H
+
 #define WINVER          0x0601
 #define _WIN32_WINNT    0x0601
 #define _WIN32_IE       0x0800
@@ -168,3 +171,5 @@ inline HRESULT SafeStrDupW(const wchar_t* src, wchar_t*& dst) throw()
     dst = ::_wcsdup(src);
     return dst != NULL ? S_OK : E_OUTOFMEMORY;
 }
+
+#endif

@@ -1,3 +1,5 @@
+#ifndef RESIZE_H
+#define RESIZE_H
 
 template <class T>
 class ResizableWindow
@@ -93,3 +95,5 @@ private:
         return false;
     }
 };
+
+#endif

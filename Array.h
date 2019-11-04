@@ -1,4 +1,5 @@
-
+#ifndef ARRAY_H
+#define ARRAY_H
 
 template <class T>
 class TPtrArrayDestroyHelper
@@ -216,3 +217,5 @@ public:
         return GetAt(index);
     }
 };
+
+#endif

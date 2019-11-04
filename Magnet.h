@@ -1,3 +1,5 @@
+#ifndef MAGNET_H
+#define MAGNET_H
 
 class MagneticWindow
 {
@@ -63,3 +65,5 @@ public:
         }
     }
 };
+
+#endif

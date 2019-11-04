@@ -1,3 +1,5 @@
+#ifndef DATAOBJECT_H
+#define DATAOBJECT_H
 
 class DataObject : public IDataObject, public IPersist
 {
@@ -427,3 +429,5 @@ protected:
 
 // {6DB994BF-6A3C-4355-BCEF-9A412221E033}
 const CLSID DataObject::CLSID_MyDataObject = { 0x6db994bf, 0x6a3c, 0x4355, { 0xbc, 0xef, 0x9a, 0x41, 0x22, 0x21, 0xe0, 0x33 } };
+
+#endif

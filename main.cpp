@@ -1,3 +1,15 @@
+#include "common.h"
+#include "ComHelper.h"
+#include "Array.h"
+#include "Utils.h"
+#include "BaseWindow.h"
+#include "DataObject.h"
+#include "DropTarget.h"
+#include "Resize.h"
+#include "Magnet.h"
+#include "MainWindow.h"
+#include "Init.h"
+
 
 int Main(int argc, __in_ecount(argc + 1) LPWSTR* argv) throw()
 {

@@ -65,4 +65,4 @@ cleanobjonly:
 .rc{$(INTDIR)}.res:
  $(RC) $(RFLAGS) /fo$@ $<
 
-"$(INTDIR)\main.obj": main.cpp
+"$(INTDIR)\main.obj": main.cpp common.h ComHelper.h Array.h Utils.h BaseWindow.h DataObject.h DropTarget.h Resize.h Magnet.h MainWindow.h Init.h

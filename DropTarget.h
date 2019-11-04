@@ -1,3 +1,5 @@
+#ifndef DROPTARGET_H
+#define DROPTARGET_H
 
 template <class T>
 class DECLSPEC_NOVTABLE DropTargetImpl : public IDropTarget, public IOleWindow
@@ -276,3 +278,5 @@ public:
         }
     }
 };
+
+#endif

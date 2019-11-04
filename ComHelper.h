@@ -1,3 +1,5 @@
+#ifndef COMHELPER_H
+#define COMHELPER_H
 
 template <class T>
 class ComPtr
@@ -68,3 +70,5 @@ public:
         return this->ptr->QueryInterface(IID_PPV_ARGS(outPtr));
     }
 };
+
+#endif

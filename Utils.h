@@ -1,4 +1,5 @@
-
+#ifndef UTILS_H
+#define UTILS_H
 
 BOOL GetWorkAreaRect(HWND hwnd, __out RECT* prc) throw()
 {
@@ -141,3 +142,5 @@ void SetWindowBlur(HWND hwnd)
         ::FreeLibrary(hmod);
     }
 }
+
+#endif

@@ -1,3 +1,5 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
 
 #include "res.rc"
 
@@ -596,3 +598,5 @@ public:
         }
     }
 };
+
+#endif
